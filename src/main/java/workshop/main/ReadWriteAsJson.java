@@ -20,7 +20,7 @@ import java.util.Scanner;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class WriteAsJsonWithoutAPI {
+public class ReadWriteAsJson {
     private static final String FILE_PATH = "src/main/resources/table.txt";
 
     private static final String NULL_STR = "null";
@@ -79,11 +79,12 @@ public class WriteAsJsonWithoutAPI {
                     Map<String, Object> map = objectMapper.readValue(json, new TypeReference<>() {
                     });
                     for (Map.Entry<String, Object> entry : map.entrySet()) {
-                        int index = Integer.parseInt(entry.getKey());
+                        String columnName = entry.getKey();
                         Object value = entry.getValue();
 
                         for (Column column : columns) {
-                            if (column.columnIndex() == index) {
+                            if (columnName.equals(column.columnName())) {
+                                int index = column.columnIndex();
                                 String type = column.columnType();
                                 switch (type) {
                                     case "DATE" -> {
@@ -92,6 +93,15 @@ public class WriteAsJsonWithoutAPI {
                                         } else {
                                             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
                                             java.util.Date parse = sdf.parse(value.toString().substring(0, 10));
+                                            insertStatement.setObject(index, new Date(parse.getTime()), Types.DATE);
+                                        }
+                                    }
+                                    case "TIMESTAMP(6)" -> {
+                                        if (NULL_STR.equals(value)) {
+                                            insertStatement.setNull(index, Types.DATE);
+                                        } else {
+                                            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
+                                            java.util.Date parse = sdf.parse(value.toString());
                                             insertStatement.setObject(index, new Date(parse.getTime()), Types.DATE);
                                         }
                                     }
@@ -171,11 +181,11 @@ public class WriteAsJsonWithoutAPI {
                 int num = 1;
                 for (Column column : columns) {
                     if (columns.size() == num) {
-                        sb.append("\"").append(column.columnIndex()).append("\"")
+                        sb.append("\"").append(column.columnName()).append("\"")
                                 .append(":").append("\"")
                                 .append(rs.getObject(column.columnIndex())).append("\"");
                     } else {
-                        sb.append("\"").append(column.columnIndex()).append("\"")
+                        sb.append("\"").append(column.columnName()).append("\"")
                                 .append(":")
                                 .append("\"").append(rs.getObject(column.columnIndex())).append("\"").append(",");
                     }
