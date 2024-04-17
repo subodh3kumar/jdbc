@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import workshop.model.Column;
 import workshop.util.JdbcUtil;
 
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,15 +16,18 @@ import java.nio.file.StandardOpenOption;
 import java.sql.*;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public class ReadWriteAsJson {
-    private static final String FILE_PATH = "src/main/resources/table.txt";
+    private static final String FILE_PATH = "src/main/resources/data/";
 
     private static final String NULL_STR = "null";
 
@@ -36,36 +42,59 @@ public class ReadWriteAsJson {
         System.out.print("Enter where clause: ");
         String whereClause = input.nextLine();
 
-        System.out.println("table name: " + tableName);
-        System.out.println("where clause: " + whereClause);
-
         if (tableName.isBlank()) {
             throw new NullPointerException("table name can't be null");
         }
 
-        List<Column> columns = new ArrayList<>();
+        deleteOldFilesIfExists();
 
-        readSourceTableRows(tableName, whereClause, columns);
-        insertTargetTableRows(tableName, whereClause, columns);
+        List<Column> columns = new ArrayList<>();
+        String fileName = getFileName();
+
+        readSourceTableRows(tableName, whereClause, columns, fileName);
+        insertTargetTableRows(tableName, whereClause, columns, fileName);
     }
 
-    private static void insertTargetTableRows(String tableName, String whereClause, List<Column> columns) {
-        Path path = Path.of(FILE_PATH);
-        boolean exists = Files.exists(path);
-        if (!exists) {
-            throw new RuntimeException();
+    private static String getFileName() {
+        return FILE_PATH + "table_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
+    }
+
+    private static void deleteOldFilesIfExists() {
+        try (Stream<Path> directoryWalk = Files.walk(Path.of(FILE_PATH))) {
+            directoryWalk.map(Path::toFile)
+                    .filter(Predicate.not(File::isDirectory))
+                    .forEach(File::delete);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
         }
+    }
+
+    private static void insertTargetTableRows(String tableName, String whereClause, List<Column> columns, String fileName) {
+        Path path = Path.of(fileName);
+        verifyFilesExists(path);
+
         System.out.println("table rows file is available, file name: " + path.getFileName().toString());
 
         String insertQuery = "INSERT INTO DEV." + tableName + " VALUES (" + getPlaceholder(columns.size()) + ")";
-        System.out.println("insert query: " + insertQuery);
 
         String deleteQuery = "DELETE FROM DEV." + tableName;
         if (!whereClause.isBlank()) {
             deleteQuery += " " + deleteQuery;
         }
-        System.out.println("delete query: " + deleteQuery);
 
+        List<String> lines = new ArrayList<>();
+        try (BufferedReader reader = Files.newBufferedReader(path)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        insertRows(lines, columns, insertQuery, deleteQuery);
+    }
+
+    private static void insertRows(List<String> list, List<Column> columns, String insertQuery, String deleteQuery) {
         try (Connection connection = JdbcUtil.getTargetConnection();
              PreparedStatement deleteStatement = connection.prepareStatement(deleteQuery);
              PreparedStatement insertStatement = connection.prepareStatement(insertQuery)) {
@@ -74,10 +103,10 @@ public class ReadWriteAsJson {
             System.out.println("total rows deleted: " + num);
 
             ObjectMapper objectMapper = new ObjectMapper();
-            Files.readAllLines(path).forEach(json -> {
+            list.forEach(json -> {
                 try {
-                    Map<String, Object> map = objectMapper.readValue(json, new TypeReference<>() {
-                    });
+                    Map<String, Object> map = getJsonValue(json, objectMapper); //objectMapper.readValue(json, new TypeReference<>() {
+                    //});
                     for (Map.Entry<String, Object> entry : map.entrySet()) {
                         String columnName = entry.getKey();
                         Object value = entry.getValue();
@@ -133,34 +162,48 @@ public class ReadWriteAsJson {
                         }
                     }
                     insertStatement.addBatch();
-                } catch (JsonProcessingException | SQLException | ParseException e) {
+                } catch (SQLException | ParseException e) {
                     throw new RuntimeException(e);
                 }
             });
             int[] insertedRows = insertStatement.executeBatch();
             System.out.println("total rows inserted: " + insertedRows.length);
-        } catch (SQLException | IOException e) {
+        } catch (SQLException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    private static Map<String, Object> getJsonValue(String line, ObjectMapper objectMapper) {
+        try {
+            return objectMapper.readValue(line, new TypeReference<>() {
+            });
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private static void verifyFilesExists(Path path) {
+        boolean exists = Files.exists(path);
+        if (!exists) {
+            throw new RuntimeException();
         }
     }
 
     private static String getPlaceholder(int size) {
         return Stream.generate(() -> "?").limit(size).collect(Collectors.joining(", "));
-
     }
 
-    private static void readSourceTableRows(String tableName, String whereClause, List<Column> columns) {
+    private static void readSourceTableRows(String tableName, String whereClause, List<Column> columns, String fileName) {
         String selectQuery = "SELECT * FROM ORA." + tableName;
         if (!whereClause.isBlank()) {
             selectQuery += " " + whereClause.trim();
         }
-        System.out.println("select query: " + selectQuery);
 
-        try (Connection connection = JdbcUtil.getSourceConnection()) {
-            PreparedStatement ps = connection.prepareStatement(selectQuery);
-            ResultSet rs = ps.executeQuery();
+        Path path = Path.of(fileName);
+        try (BufferedWriter writer = Files.newBufferedWriter(path, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+             Connection connection = JdbcUtil.getSourceConnection()) {
 
-            Path path = Path.of(FILE_PATH);
+            System.out.println("select query: " + selectQuery);
 
             DatabaseMetaData metaData = connection.getMetaData();
             ResultSet columnResultSet = metaData.getColumns(null, "ORA", tableName, null);
@@ -173,12 +216,15 @@ public class ReadWriteAsJson {
                 columns.add(new Column(columnIndex, columnName, columnType, decimalDigits));
             }
 
-            Files.deleteIfExists(path);
+            PreparedStatement statement = connection.prepareStatement(selectQuery);
+            ResultSet rs = statement.executeQuery();
 
-            StringBuilder sb = new StringBuilder();
             while (rs.next()) {
-                sb.append("{");
                 int num = 1;
+
+                StringBuilder sb = new StringBuilder();
+                sb.append("{");
+
                 for (Column column : columns) {
                     if (columns.size() == num) {
                         sb.append("\"").append(column.columnName()).append("\"")
@@ -193,8 +239,9 @@ public class ReadWriteAsJson {
                 }
                 sb.append("}");
                 sb.append(System.lineSeparator());
+                writer.write(sb.toString());
+                writer.flush();
             }
-            Files.write(path, sb.toString().getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             System.out.println("table rows fetched to file successfully");
         } catch (SQLException | IOException e) {
             throw new RuntimeException(e);
